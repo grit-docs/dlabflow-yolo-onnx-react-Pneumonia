@@ -321,6 +321,16 @@ button:disabled {
   cursor: not-allowed;
 }
 
+.sample-image-button {
+  cursor: pointer;
+  padding: 10px 15px;
+  border-radius: 4px;
+  border: none;
+  color: #fff;
+  font-weight: bold;
+  font-size: 14px;
+}
+
 /* Badge component */
 .badge {
   display: inline-flex;
@@ -414,6 +424,11 @@ button:disabled {
 
 .icon-camera::before {
   content: "📷";
+  font-size: 1.25rem;
+}
+
+.icon-rocket::before {
+  content: "🚀";
   font-size: 1.25rem;
 }
 
@@ -602,6 +617,12 @@ button:disabled {
 
 /* Small mobile devices */
 @media (max-width: 480px) {
+  .header-content {
+    flex-direction: column;
+    align-items: center;
+    gap: 1rem;
+  }
+
   .logo-container {
     gap: 0.5rem;
   }
@@ -664,6 +685,11 @@ button:disabled {
   .button {
     padding: 0.625rem 1.5rem;
     font-size: 0.875rem;
+  }
+
+  .sample-image-button {
+    padding: 3px 5px;
+    font-size: 12px;
   }
 
   .detections-card {

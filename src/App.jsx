@@ -5,7 +5,6 @@
  * 브라우저에서 완전히 동작하며 사용자의 카메라를 통해 객체를 탐지하고 바운딩 박스로 표시합니다.
  */
 import { useState, useRef, useEffect, useCallback, memo } from 'react'
-import Webcam from 'react-webcam'
 import * as ort from 'onnxruntime-web'
 import 'onnxruntime-web/webgl'; // 🚀 WebGL 백엔드를 명시적으로 활성화
 import './App.css'
@@ -20,6 +19,7 @@ const Icon = memo(({ name, className }) => {
   const icons = {
     loader: <div className="icon-loader"></div>,
     camera: <div className="icon-camera"></div>,
+    rocket: <div className="icon-rocket"></div>,
     power: <div className="icon-power"></div>,
     zap: <div className="icon-zap"></div>,
     logo: <img src="/logo_icon.svg" alt="바운딩 박스" className="icon-logo" style={{ width: '50px', height: '50px' }} />,
@@ -116,15 +116,14 @@ const StartCard = memo(({ onStart, isModelLoaded }) => {
       <div>
         <Icon name="logo2" />
       </div>
-      <h2>D-Lab Flow 실시간 객체 탐지 데모</h2>
-      <p>카메라 시작 버튼을 눌러주세요</p>
+      <h2>D-Lab Flow 폐렴 객체 탐지 데모</h2>
       <Button
           onClick={onStart}
           disabled={!isModelLoaded}
           className="start-button"
       >
-        <Icon name="camera" />
-        카메라 시작
+        <Icon name="rocket" />
+        시작하기
       </Button>
     </Card>
   );
@@ -211,97 +210,121 @@ async function extractClassesFromModel(modelPath) {
   return []; // 실패 시 빈 배열 반환
 }
 
+// nms 체크 함수
+async function checkNMSInModel(modelPath) {
+  try {
+    const response = await fetch(modelPath);
+    if (!response.ok) return false;
+
+    const buffer = await response.arrayBuffer();
+    const text = new TextDecoder().decode(new Uint8Array(buffer));
+
+    // 'nms': True 또는 'nms': False 패턴 찾기
+    const nmsMatch = text.match(/'nms':\s*(True|False)/i);
+
+    if (nmsMatch) {
+      const nmsValue = nmsMatch[1].toLowerCase() === 'true';
+      console.log(`✅ NMS 설정 발견:`, nmsValue);
+      return nmsValue;
+    }
+
+    console.log('❌ NMS 설정을 찾을 수 없음');
+    return false;
+
+  } catch (e) {
+    console.error('🚨 NMS 확인 중 오류:', e);
+    return false;
+  }
+}
+// =======================================================================
+
 function App() {
   // Refs
-  const webcamRef = useRef(null);
-  const canvasRef = useRef(null);
+  const canvasRef = useRef(null); // 화면 표시용
   const sessionRef = useRef(null);
-  const animationRef = useRef(null);
-  const streamRef = useRef(null);
-  const scaleCanvasRef = useRef(document.createElement('canvas'));
+  const scaleCanvasRef = useRef(document.createElement('canvas')); // 원본이미지 그대로의 임시 캔버스
   // 📱 성능 최적화를 위한 임시 canvas 재사용
-  const tempCanvasRef = useRef(document.createElement('canvas'));
-  const sourceCanvasRef = useRef(document.createElement('canvas'));
+  const tempCanvasRef = useRef(document.createElement('canvas')); // 640 x 640 크기로 리사이즈된 이미지 저장용
+  const sourceCanvasRef = useRef(document.createElement('canvas')); // 리사이즈를 위해 임시로 담음
   const modelLoadingStartedRef = useRef(false); // 🚀 모델 로딩 이중 실행 방지 플래그
 
   const detectionMemoryRef = useRef([]); // 최신 탐지 결과 + 유지할 이전 결과 포함
-  const MAX_MISSED_FRAMES = 3; // 객체가 안 보여도 몇 프레임 유지
 
   // State variables
   const [isModelLoaded, setIsModelLoaded] = useState(false);
   const [isModelLoading, setIsModelLoading] = useState(true);
   const [classes, setClasses] = useState([]);
-  const [isDetecting, setIsDetecting] = useState(false);
+  const [isDetecting, setIsDetecting] = useState(false); // 탐지 페이지
   const [errorMessage, setErrorMessage] = useState('');
   const [detections, setDetections] = useState([]);
-  const [currentFPS, setCurrentFPS] = useState(0);
   const [debugMode] = useState(false); // 디버깅 모드 활성화 (문제 진단용)
   const [customThreshold, setCustomThreshold] = useState(0.5); // Custom threshold 조절
   const thresholdRef = useRef(0.5); // 🔧 실시간 threshold를 위한 ref
   
-  // 🎯 스마트 카메라 반전 시스템 State
-  const [cameraFacing, setCameraFacing] = useState("user"); // PC 기본값: "user" (웹캠)
-  const [shouldFlipCamera, setShouldFlipCamera] = useState(true); // PC 기본값: 미러링
-  const [isMobile, setIsMobile] = useState(false); // 모바일 감지
-  const [deviceType, setDeviceType] = useState(null); // "desktop" or "mobile" - null로 시작하여 경쟁 조건 방지
-  const [manualFlip, setManualFlip] = useState(null); // 수동 반전 설정 (null = 자동)
-  const [isSwitchingCamera, setIsSwitchingCamera] = useState(false); // 카메라 전환 중 상태
-  const [webcamKey, setWebcamKey] = useState(Date.now()); // 📸 Webcam 강제 리마운트를 위한 key
-  
-  // shouldFlipCamera의 최신 값을 항상 참조하기 위한 ref
-  const shouldFlipCameraRef = useRef(false);
-  
-  // isSwitchingCamera의 최신 값을 항상 참조하기 위한 ref
-  const isSwitchingCameraRef = useRef(false);
-  
+  // 🎯 접속환경 탐지
+  const [deviceType, setDeviceType] = useState(null); // "desktop" or "mobile" 표시용
+
+  // 이미지 업로드용 추가 상태변수
+  const [selectedImage, setSelectedImage] = useState(null);
+  const imageElementRef = useRef(null);
+  const [isDrawingBox, setIsDrawingBox] = useState(false);
+  const [isNMS, setIsNMS] = useState(false);
+
+
   // customThreshold 변경 시 ref도 업데이트
   useEffect(() => {
     thresholdRef.current = customThreshold;
+     inferenceLoop();
   }, [customThreshold]);
 
-  // shouldFlipCamera 변경 시 ref도 업데이트
-  useEffect(() => {
-    shouldFlipCameraRef.current = shouldFlipCamera;
-  }, [shouldFlipCamera]);
 
-  // isSwitchingCamera 변경 시 ref도 업데이트
   useEffect(() => {
-    isSwitchingCameraRef.current = isSwitchingCamera;
-  }, [isSwitchingCamera]);
+    if (selectedImage) {
+      console.log("✅ 탐지 시작");
+      // console.log(`🖼️ 선택된 이미지: ${selectedImage}`);
+      inferenceLoop();
+    }
+    return () => {
+      if (selectedImage && typeof selectedImage !== 'string') {
+        URL.revokeObjectURL(selectedImage);
+      }
+    };
+  }, [selectedImage]);
+
+
+  useEffect(() => {
+    // 캔버스가 렌더되고, 새로운 detection이 있을 때마다 실행
+    if (!isDrawingBox && canvasRef.current && detections.length > 0) {
+      const canvas = canvasRef.current;
+
+      // 캔버스 크기 및 그림 그리기
+      canvas.width = scaleCanvasRef.current.width;
+      canvas.height = scaleCanvasRef.current.height;
+
+      const ctx = canvas.getContext('2d');
+
+      ctx.clearRect(0, 0, canvas.width, canvas.height);
+      drawBoundingBoxes(detectionMemoryRef.current, ctx, canvas.width, canvas.height);
+
+      console.log("🖼️ 캔버스에 결과 그리기 완료");
+    }
+  }, [isDrawingBox, detections]);
+
+
 
   // 🎯 플랫폼 감지 및 초기 설정 (한 번만 실행)
   useEffect(() => {
     // 플랫폼 감지
     const userAgent = navigator.userAgent || navigator.vendor || window.opera;
     const isMobileDevice = /android|iphone|ipad|ipod|blackberry|iemobile|opera mini/i.test(userAgent.toLowerCase());
-    
-    setIsMobile(isMobileDevice);
+
     const detectedDeviceType = isMobileDevice ? "mobile" : "desktop";
     setDeviceType(detectedDeviceType);
-    
-    // 모바일이면 카메라 설정 조정
-    if (isMobileDevice) {
-      setCameraFacing("environment"); // 모바일: 후면 카메라로 시작
-      setShouldFlipCamera(false); // 모바일 후면: 정방향
-    }
-    // PC는 이미 초기값이 올바르게 설정됨 (user, true)
-    
-    const finalCamera = isMobileDevice ? "environment" : "user";
-    const finalFlip = isMobileDevice ? false : true;
-    console.log(`✅ 플랫폼 감지 완료: ${detectedDeviceType}, 카메라: ${finalCamera}, 미러링: ${finalFlip}`);
+
+    console.log(`✅ 플랫폼 감지 완료: ${detectedDeviceType}`);
   }, []); // 완전히 한 번만 실행
 
-  // 카메라 타입 변경 시에만 자동 반전 재계산 (수동 설정이 없을 때만)
-  useEffect(() => {
-    if (manualFlip === null && deviceType) {
-      if (deviceType === "desktop") {
-        setShouldFlipCamera(true); // PC: 항상 미러링
-      } else if (deviceType === "mobile") {
-        setShouldFlipCamera(cameraFacing === "user"); // 모바일: 전면만 미러링
-      }
-    }
-  }, [cameraFacing, deviceType, manualFlip]);
-  
+
   // 모델 출력 구조 정보를 저장하는 ref 추가
   const modelInfoRef = useRef({
     outputShape: null,
@@ -313,6 +336,7 @@ function App() {
     isTransposed: false,
     isStructureDetected: false // 모델 구조 감지 완료 여부
   });
+
 
   // 모델 로드 - deviceType이 설정된 후에 실행
   useEffect(() => {
@@ -349,8 +373,14 @@ function App() {
             return;
           }
         }
+
         setClasses(classNames);
-        
+
+        // nms 체크
+        const nmscheck = await checkNMSInModel(modelPath);
+        setIsNMS(nmscheck);
+
+
         // 2. ONNX 모델 및 세션 생성
         // 📱 디바이스 종류에 따라 최적의 실행 백엔드 목록을 선택
         const providers = deviceType === 'desktop'
@@ -382,105 +412,84 @@ function App() {
       }
     }
     loadModel();
-    return () => {
-      if (animationRef.current) cancelAnimationFrame(animationRef.current);
-      if (streamRef.current) streamRef.current.getTracks().forEach(t => t.stop());
-    };
   }, [deviceType]); // deviceType이 설정되면 모델 로딩
 
 
 
-  // 렌더링 루프
-  const drawLoop = useCallback(() => {
-    const canvas = canvasRef.current;
-    const video = webcamRef.current?.video;
-    if (!canvas || !video || !isDetecting) {
-      // 탐지가 중지되면 애니메이션 중지
-      if (animationRef.current) {
-        cancelAnimationFrame(animationRef.current);
-        animationRef.current = null;
-      }
-      return;
-    }
-    
-    // 캔버스 크기를 비디오 해상도에 맞춤
-    canvas.width = video.videoWidth;
-    canvas.height = video.videoHeight;
-    const ctx = canvas.getContext('2d');
-    // 그리기 전 클리어
-    ctx.clearRect(0, 0, canvas.width, canvas.height);
-    drawBoundingBoxes(detectionMemoryRef.current, ctx, canvas.width, canvas.height, shouldFlipCameraRef.current);
-    
-    // 다음 프레임 예약
-    animationRef.current = requestAnimationFrame(drawLoop);
-  }, [isDetecting]); // shouldFlipCamera는 ref로 참조하므로 의존성에서 제거
 
   // 🚀 병렬 추론 처리를 위한 설정
   const activeInferencesRef = useRef(new Set());
   const lastSuccessfulResultTimeRef = useRef(0);
-  // 📱 모바일 추론 빈도 제한을 위한 카운터
-  const frameCounterRef = useRef(0);
-  
-  // 📊 성능 모니터링
-  const performanceRef = useRef({
-    lastFrameTime: Date.now(),
-    frameCount: 0,
-    currentFPS: 0
-  });
+
+
   
   // 🚀 고성능 추론 루프 - 스마트 Session 관리
   const inferenceLoop = useCallback(async () => {
-    if (!isDetecting || !webcamRef.current || !sessionRef.current || isSwitchingCameraRef.current) return;
-    
-    // 🛡️ 초고속 Session 관리 - 1개만 허용하되 최소 대기
-    if (activeInferencesRef.current.size > 0) {
-      // 최소 대기 - Session 완료를 기다림
-      setTimeout(inferenceLoop, 1);
-      return;
-    }
-    
-    const video = webcamRef.current.video;
-    if (video.readyState === 4) {
-      // 📱 모든 디바이스에서 동일한 추론 빈도 (안정성 우선)
-      // 추론 빈도 제한 제거
-      
+    if (!isDetecting || !sessionRef.current || !selectedImage) return;
+
+    setIsDrawingBox(true);
+
+    const inferenceId = Date.now() + Math.random();
+
+    // 이미지 로딩 프로세스 개선
+    try {
+      // 이미지를 한번에 로드하고 캔버스에 그리기
+      const img = new Image();
+      await new Promise((resolve, reject) => {
+        img.onload = resolve;
+        img.onerror = () => reject(new Error('이미지 로드 실패'));
+        img.src = selectedImage; // selectedImage는 이미 URL 문자열
+      });
+
+      if (debugMode) {
+        console.log('이미지 로드 성공');
+      }
+
       const scaleCanvas = scaleCanvasRef.current;
-      
-      // 📱 모든 디바이스에서 동일한 스케일 팩터 (안정성 우선)
-      const factor = 0.4; // 모든 디바이스: 40%
-      
-      scaleCanvas.width = Math.floor(video.videoWidth * factor);
-      scaleCanvas.height = Math.floor(video.videoHeight * factor);
-      const sctx = scaleCanvas.getContext('2d', { 
+      // 원본 이미지 크기 그대로 사용
+      scaleCanvas.width = img.naturalWidth;
+      scaleCanvas.height = img.naturalHeight;
+
+      const sctx = scaleCanvas.getContext('2d', {
         willReadFrequently: true,
         alpha: false, // 투명도 처리 비활성화로 성능 향상
         desynchronized: true // 비동기 렌더링으로 성능 향상
       });
-      sctx.drawImage(video, 0, 0, scaleCanvas.width, scaleCanvas.height);
+
+      sctx.clearRect(0, 0, scaleCanvas.width, scaleCanvas.height);
+      sctx.drawImage(img, 0, 0, scaleCanvas.width, scaleCanvas.height);
+
+      // scaleCanvas에서 이미지데이터 추출 (원본사이즈)
       const imageData = sctx.getImageData(0, 0, scaleCanvas.width, scaleCanvas.height);
+
+      // prepareInput 함수에서 640x640으로 리사이즈 및 정규화 진행
       const [input, iw, ih] = await prepareInput(imageData);
-      
+
+      if (debugMode) {
+        console.log('추론용 640x640 이미지 준비 완료');
+      }
+
       // 🚀 안전한 추론 시작 - 고유 ID로 관리
-      const inferenceId = Date.now() + Math.random();
+      // const inferenceId = Date.now() + Math.random();
       activeInferencesRef.current.add(inferenceId);
-      
-      // ⚡ 추론 실행 
+
+      // ⚡ 추론 실행
       sessionRef.current.run({ images: input }).then(results => {
         // 🎯 추론 완료 후 관리
         activeInferencesRef.current.delete(inferenceId);
-        
-        // 📊 고성능 결과 반영 - 통일된 FPS 제한 
+
+        // 📊 고성능 결과 반영 - 통일된 FPS 제한
         const currentTime = Date.now();
         if (currentTime - lastSuccessfulResultTimeRef.current > 16) { // 60 FPS 제한
           lastSuccessfulResultTimeRef.current = currentTime;
-          
+
           const out = results[Object.keys(results)[0]];
-          
+
           // 🎯 실시간 모델 구조 자동 감지 (첫 번째 추론에서만 실행)
           if (!modelInfoRef.current.isStructureDetected && out.dims.length === 3) {
             const [batch, dim1, dim2] = out.dims;
             let numDetections, detectionLength, isTransposed;
-            
+
             // 💡 [개선된 방식] `classes.length`를 사용하여 모델 구조를 더 명확하게 판단합니다.
             const numLoadedClasses = classes.length > 0 ? classes.length : 80; // 로드된 클래스 개수 (없으면 80으로 가정)
             const expectedLengths = [
@@ -506,7 +515,7 @@ function App() {
               // 모호한 경우, 기존의 크기 비교 방식으로 안전하게 처리 (Fallback)
               const reason = dim1IsExpected && dim2IsExpected ? "두 차원 모두 예상 길이에 해당" : "두 차원 모두 예상 길이와 불일치";
               console.warn(`모델 구조 감지 모호함 (${reason}). 크기 비교로 대체합니다. dims:[${dim1}, ${dim2}], expected:[${expectedLengths.join(',')}]`);
-              
+
               if (dim2 > dim1) {
                 isTransposed = true;
                 numDetections = dim2;
@@ -517,19 +526,21 @@ function App() {
                 detectionLength = dim2;
               }
             }
-            
+
             // 모델 정보 업데이트
             modelInfoRef.current.isTransposed = isTransposed;
             modelInfoRef.current.numDetections = numDetections;
             modelInfoRef.current.detectionLength = detectionLength;
-            
+
             // 🔍 [개선된 방식] `detectionLength`와 `numLoadedClasses`를 기반으로 모델 타입 명확화
             let modelType = "Unknown";
             let coordinateFormat = "center";
             let isYOLOv5su = false; // 'su'는 객체 점수가 없는 모델을 지칭하는 내부 용어
             let numClasses = numLoadedClasses;
 
-            if (detectionLength === 6) {
+            /*if (detectionLength === 6) {*/
+            if (detectionLength === 6 && isNMS === true) {
+              //  현재 onnx 변환시 후처리 하지않음 + 후처리 된 모델만 처리
               modelType = "Post-processed (Corner)";
               coordinateFormat = "corner";
               isYOLOv5su = true; // 이 형식은 객체 점수가 없음
@@ -550,94 +561,54 @@ function App() {
               numClasses = estimatedClasses;
               console.warn(`알 수 없는 모델 구조입니다. (length: ${detectionLength}). ${estimatedClasses}개 클래스로 추정하여 처리합니다.`);
             }
-            
+
             // 설정 적용
             modelInfoRef.current.isYOLOv5su = isYOLOv5su;
             modelInfoRef.current.coordinateFormat = coordinateFormat;
             modelInfoRef.current.numClasses = numClasses;
             modelInfoRef.current.isStructureDetected = true;
-            
+
             console.log(`✅ 모델 자동 감지 완료: ${modelType}, Transposed: ${isTransposed}, Detections: ${numDetections}, Length: ${detectionLength}`);
           }
-          
+
           const newDetections = processDetections(
               out.data,
               out.dims,
               iw,
               ih,
-              video.videoWidth,
-              video.videoHeight,
+              scaleCanvas.width,
+              scaleCanvas.height,
               thresholdRef.current
           );
-          
-          if (newDetections.length > 0) {
-            detectionMemoryRef.current = newDetections.map(d => ({ ...d, missed: 0 }));
-          } else {
-            detectionMemoryRef.current = detectionMemoryRef.current
-                .map(d => ({ ...d, missed: d.missed + 1 }))
-                .filter(d => d.missed <= MAX_MISSED_FRAMES);
-          }
+
+          detectionMemoryRef.current = newDetections;
           setDetections(detectionMemoryRef.current);
-          
-          // 📊 고성능 FPS 계산 및 업데이트
-          performanceRef.current.frameCount++;
-          if (currentTime - performanceRef.current.lastFrameTime >= 1000) {
-            const fps = performanceRef.current.frameCount;
-            performanceRef.current.currentFPS = fps;
-            performanceRef.current.frameCount = 0;
-            performanceRef.current.lastFrameTime = currentTime;
-            
-            setCurrentFPS(fps);
-            
-            if (deviceType === 'mobile' && debugMode) {
-              console.log(`📱 모바일 FPS: ${fps}`);
-            }
-          }
+
+          // Bbox 그리기는 useeffect
+
         }
-        
-        // ⚡ 추론 성공 - 즉시 다음 추론 시작
-        setTimeout(inferenceLoop, 1);
-        
-      }).catch(error => {
+      })
+      // 약간의 지연
+      await new Promise(resolve => setTimeout(resolve, 1000));
+
+    } catch(error) {
         // 🚫 에러 처리 - 추론 ID 정리
         activeInferencesRef.current.delete(inferenceId);
-        
+
         if (debugMode && error.message.includes('Session')) {
           console.log('⚡ Session 충돌 감지 - 빠른 재시도');
         } else if (debugMode) {
           console.warn('추론 에러 (무시):', error.message);
+        } else {
+          console.error('이미지 처리 중 오류:', error);
         }
-        
-        // ⚡ 에러 발생 - 최소 지연 후 재시도
-        setTimeout(inferenceLoop, 5);
-      });
-          } else {
-        // 비디오가 준비되지 않은 경우 최소 간격으로 대기
-        const interval = deviceType === 'mobile' ? 20 : 10;
-        setTimeout(inferenceLoop, interval);
-      }
-  }, [isDetecting]);
-
-  // isDetecting 및 isSwitchingCamera 변경시 루프 시작/중지
-  useEffect(() => {
-    if (isDetecting && !isSwitchingCameraRef.current) {
-      // 기존 애니메이션 프레임 취소
-      if (animationRef.current) {
-        cancelAnimationFrame(animationRef.current);
-      }
-      // 새로운 drawLoop 시작
-      requestAnimationFrame(drawLoop);
-      inferenceLoop();
-      console.log('🔄 추론 루프 시작 - isDetecting:', isDetecting, 'isSwitchingCamera:', isSwitchingCameraRef.current);
-    } else {
-      if (animationRef.current) {
-        cancelAnimationFrame(animationRef.current);
-      }
-      if (isDetecting && isSwitchingCameraRef.current) {
-        console.log('⏸️ 카메라 전환 중 - 추론 루프 일시 중지');
-      }
+    } finally {
+      setIsDrawingBox(false);
     }
-  }, [isDetecting, isSwitchingCamera, drawLoop, inferenceLoop]); // isSwitchingCamera는 ref 동기화를 위해 유지
+  }, [selectedImage, isDetecting]);
+
+
+
 
   // 🎯 카메라 시작 - `react-webcam`에 스트림 관리를 위임하도록 수정
   const startCamera = useCallback(() => {
@@ -646,71 +617,7 @@ function App() {
     setIsDetecting(true);
   }, []);
 
-  // 🎯 카메라 전환 (모바일 전용) - Android 호환성 및 안정성 강화
-  const switchCamera = async () => {
-    // 🔒 이미 전환 중이거나 카메라가 꺼져있으면 무시
-    if (isSwitchingCamera || !isDetecting) {
-      console.log('⚠️ 카메라 전환 요청 무시 - 전환 중이거나 카메라 꺼짐');
-      return;
-    }
 
-    const newFacing = cameraFacing === "user" ? "environment" : "user";
-    console.log(`📷 카메라 전환: ${cameraFacing} → ${newFacing}`);
-
-    // 카메라 전환 시작 - 로딩 상태 설정
-    setIsSwitchingCamera(true);
-
-    // 🎯 이전 카메라의 모든 탐지 결과 클리어
-    setDetections([]);
-    detectionMemoryRef.current = [];
-    console.log('🧹 카메라 전환 시 이전 탐지 결과 클리어');
-
-    // 수동 반전 설정 리셋
-    setManualFlip(null);
-
-    // 1. 현재 스트림을 먼저 명시적으로 중지. (Android 호환성)
-    if (streamRef.current) {
-        streamRef.current.getTracks().forEach(t => t.stop());
-        streamRef.current = null;
-    }
-    
-    // 2. 상태 업데이트를 setTimeout으로 감싸서 스트림 중지 후 약간의 지연을 줍니다.
-    //    이는 브라우저가 카메라 리소스를 해제할 시간을 확보하여 `NotReadableError`를 방지하기 위함입니다.
-    setTimeout(() => {
-      setCameraFacing(newFacing);
-      // key를 변경하여 Webcam 컴포넌트를 완전히 새로 마운트하도록 강제합니다.
-      setWebcamKey(Date.now());
-    }, 100); // 안드로이드 기기에서의 안정성을 위해 100ms 지연
-  };
-
-  // 🎯 수동 반전 토글
-  const toggleManualFlip = () => {
-    // 🔒 카메라 전환 중이면 무시
-    if (isSwitchingCamera) {
-      console.log('⚠️ 미러링 토글 요청 무시 - 카메라 전환 중');
-      return;
-    }
-    
-    const newManualFlip = manualFlip === null ? !shouldFlipCamera : (manualFlip ? false : true);
-    setManualFlip(newManualFlip);
-    setShouldFlipCamera(newManualFlip); // 즉시 반전 상태 업데이트
-    console.log(`🔄 [${deviceType}] 수동 반전 토글:`);
-    console.log(`   - manualFlip: ${manualFlip} → ${newManualFlip}`);
-    console.log(`   - shouldFlipCamera: ${shouldFlipCamera} → ${newManualFlip}`);
-    console.log(`   - cameraFacing: ${cameraFacing}`);
-    console.log(`   - ref값: ${shouldFlipCameraRef.current}`);
-  };
-
-  // 카메라 중지
-  const stopCamera = () => {
-    if (streamRef.current) {
-      streamRef.current.getTracks().forEach(t => t.stop());
-      streamRef.current = null;
-    }
-    setIsDetecting(false);
-    setDetections([]);
-    setCurrentFPS(0); // 📊 FPS 리셋
-  };
 
     // Process detections from model output - 수정된 버전
   const processDetections = (data, dims, imgWidth, imgHeight, canvasWidth, canvasHeight, threshold) => {
@@ -810,7 +717,7 @@ function App() {
           
           bbox = [x, y, width, height];
           className = classes[classIndex] || `클래스 ${classIndex}`;
-          
+
         } else if (coordinateFormat === 'center') {
           // YOLOv5su center format: [cx, cy, w, h, class1, ..., classN] (84개)
           let cx = getValue(i, 0);
@@ -949,7 +856,7 @@ function App() {
         }
         
         bbox = [x, y, width, height];
-        
+
         if (debugMode && i < 3) {
           console.log(`Processed YOLOv5s detection ${i}: bbox=[${x.toFixed(2)}, ${y.toFixed(2)}, ${width.toFixed(2)}, ${height.toFixed(2)}], conf=${confidence.toFixed(3)}, class=${classIndex}(${className})`);
         }
@@ -1137,8 +1044,9 @@ function App() {
     return [tensor, imgWidth, imgHeight];
   };
 
-  // Draw bounding boxes on the canvas
-  const drawBoundingBoxes = (detections, ctx, canvasWidth, canvasHeight, isFlipped = false) => {
+
+
+  const drawBoundingBoxes = (detections, ctx, canvasWidth, canvasHeight) => {
     try {
       // 캔버스 상태 저장
       ctx.save();
@@ -1155,15 +1063,6 @@ function App() {
 
       // 모든 탐지된 객체 사용 (필터링 없음)
       const recentDetections = detections;
-
-      // 비디오 프레임은 더 이상 캔버스에 그리지 않음 (Webcam 컴포넌트가 배경으로 표시됨)
-      if (debugMode && webcamRef.current && webcamRef.current.video) {
-        const video = webcamRef.current.video;
-        if (video.readyState === 4) {
-          // Log video dimensions only in debug mode
-          console.log(`Video dimensions: ${video.videoWidth}x${video.videoHeight}`);
-        }
-      }
 
       if (debugMode) {
         console.log(`Drawing ${recentDetections.length} bounding boxes - Canvas dimensions: ${canvasWidth}x${canvasHeight}`);
@@ -1207,14 +1106,6 @@ function App() {
         const className = detection.class;
         const confidence = detection.confidence;
         const classIndex = detection.classIndex;
-
-        // 🎯 반전 상태에 따른 좌표 변환
-        if (isFlipped) {
-          drawX = canvasWidth - drawX - width; // X 좌표 반전
-          if (debugMode) {
-            console.log(`미러링 적용: 원본 X=${detection.bbox[0]}, 변환된 X=${drawX}`);
-          }
-        }
 
         // Log the detection information with more details in Korean (only in debug mode)
         if (debugMode) {
@@ -1268,11 +1159,20 @@ function App() {
 
       // Restore the canvas state
       ctx.restore();
+      if(debugMode) console.log('draw 완료');
 
     } catch (error) {
       console.error("Error in drawBoundingBoxes:", error);
     }
   };
+
+  // ==================================================================================
+  const sampleImages = [
+    { src: '/samples/img1.jpg', id: 1, label: 'sample_1' },
+    { src: '/samples/img2.jpg', id: 2, label: 'sample_2' },
+    { src: '/samples/img3.jpg', id: 3, label: 'sample_3' },
+  ];
+  // ==================================================================================
 
   return (
       <div className="app-container">
@@ -1286,6 +1186,9 @@ function App() {
               <div>
                 <h1>D-Lab Flow</h1>
                 <p className="subtitle">실시간 객체 탐지 데모</p>
+              </div>
+              <div>
+                {deviceType === "mobile" ? "📱" : "🖥️"} {deviceType === "mobile" ? "모바일" : "PC"}
               </div>
             </div>
 
@@ -1303,145 +1206,7 @@ function App() {
                 onThresholdChange={setCustomThreshold}
                 disabled={!isModelLoaded || isModelLoading}
               />
-              
-              {/* 🎯 카메라 상태 표시 - 항상 영역 유지 */}
-              <div className="camera-status-info" style={{ 
-                fontSize: '0.75rem', 
-                color: 'var(--text-secondary)',
-                textAlign: 'right',
-                lineHeight: '1.2',
-                minHeight: '1.8em', // 버튼을 위해 높이 증가
-                width: '100%', // 부모 너비에 맞춤
-                display: 'flex',
-                alignItems: 'center',
-                justifyContent: 'flex-end',
-                overflow: 'visible', // 버튼이 보이도록 변경
-                whiteSpace: 'nowrap' // 텍스트 줄바꿈 방지
-              }}>
-                {isDetecting && (
-                  <>
-                    {deviceType === "mobile" ? "📱" : "🖥️"} {deviceType === "mobile" ? "모바일" : "PC"}
-                    {deviceType === "mobile" && (
-                      <>
-                        {" "}
-                        <button
-                          onClick={(e) => {
-                            if (!isSwitchingCamera) {
-                              switchCamera();
-                            }
-                            // 클릭 후 즉시 focus 제거
-                            e.target.blur();
-                          }}
-                          disabled={isSwitchingCamera}
-                          onTouchEnd={(e) => {
-                            // 모바일 터치 이벤트에서 focus 제거
-                            setTimeout(() => {
-                              e.target.blur();
-                              // body에 focus를 이동하여 버튼 focus 완전 제거
-                              if (document.body.focus) {
-                                document.body.focus();
-                              } else {
-                                document.activeElement?.blur();
-                              }
-                            }, 10);
-                          }}
-                          style={{
-                            all: 'unset',
-                            display: 'inline-block',
-                            backgroundColor: isSwitchingCamera ? 'rgba(128, 128, 128, 0.1)' : 'rgba(59, 130, 246, 0.1)',
-                            border: isSwitchingCamera ? '1px solid rgba(128, 128, 128, 0.3)' : '1px solid rgba(59, 130, 246, 0.3)',
-                            borderRadius: '0.25rem',
-                            color: isSwitchingCamera ? 'var(--text-secondary)' : 'var(--primary-color)',
-                            cursor: isSwitchingCamera ? 'not-allowed' : 'pointer',
-                            fontSize: '0.7rem',
-                            padding: '0.2rem 0.4rem',
-                            margin: '0 0.2rem',
-                            transition: 'all 0.2s ease',
-                            fontWeight: '500',
-                            outline: 'none',
-                            boxShadow: 'none',
-                            WebkitTapHighlightColor: 'transparent',
-                            tabIndex: '-1',
-                            opacity: isSwitchingCamera ? 0.6 : 1
-                          }}
-                          onMouseEnter={(e) => {
-                            // PC에서만 호버 효과 (비활성화 상태가 아닐 때만)
-                            if (deviceType === "desktop" && !isSwitchingCamera) {
-                              e.target.style.backgroundColor = 'rgba(59, 130, 246, 0.2)';
-                              e.target.style.borderColor = 'rgba(59, 130, 246, 0.5)';
-                            }
-                          }}
-                          onMouseLeave={(e) => {
-                            // PC에서만 호버 효과 해제 (비활성화 상태가 아닐 때만)
-                            if (deviceType === "desktop" && !isSwitchingCamera) {
-                              e.target.style.backgroundColor = 'rgba(59, 130, 246, 0.1)';
-                              e.target.style.borderColor = 'rgba(59, 130, 246, 0.3)';
-                            }
-                          }}
-                          title={isSwitchingCamera ? "카메라 전환 중..." : "클릭하여 카메라 전환"}
-                        >
-                          📷 {cameraFacing === "user" ? "전면" : "후면"}
-                        </button>
-                      </>
-                    )}
-                    {" "}
-                    <button 
-                      onClick={(e) => {
-                        if (!isSwitchingCamera) {
-                          toggleManualFlip();
-                        }
-                        e.target.blur(); // 클릭 후 focus 제거
-                      }}
-                      disabled={isSwitchingCamera}
-                      onTouchEnd={(e) => {
-                        // 모바일 터치 이벤트에서 focus 제거 (preventDefault 제거)
-                        setTimeout(() => {
-                          e.target.blur();
-                          // body에 focus를 이동하여 버튼 focus 완전 제거
-                          if (document.body.focus) {
-                            document.body.focus();
-                          } else {
-                            document.activeElement?.blur();
-                          }
-                        }, 10);
-                      }}
-                      style={{
-                        backgroundColor: isSwitchingCamera ? 'rgba(128, 128, 128, 0.1)' : 'rgba(16, 185, 129, 0.1)',
-                        border: isSwitchingCamera ? '1px solid rgba(128, 128, 128, 0.3)' : '1px solid rgba(16, 185, 129, 0.3)',
-                        borderRadius: '0.25rem',
-                        color: isSwitchingCamera ? 'var(--text-secondary)' : 'var(--primary-color)',
-                        cursor: isSwitchingCamera ? 'not-allowed' : 'pointer',
-                        fontSize: '0.7rem',
-                        padding: '0.2rem 0.4rem',
-                        margin: '0 0.2rem',
-                        transition: 'all 0.2s ease',
-                        fontWeight: '500',
-                        outline: 'none', // focus outline 제거
-                        WebkitTapHighlightColor: 'transparent', // 모바일 터치 하이라이트 제거
-                        tabIndex: '-1', // 탭 네비게이션에서 제외
-                        opacity: isSwitchingCamera ? 0.6 : 1
-                      }}
-                      onMouseEnter={(e) => {
-                        // PC에서만 호버 효과 적용 (비활성화 상태가 아닐 때만)
-                        if (deviceType === "desktop" && !isSwitchingCamera) {
-                          e.target.style.backgroundColor = 'rgba(16, 185, 129, 0.2)';
-                          e.target.style.borderColor = 'rgba(16, 185, 129, 0.5)';
-                        }
-                      }}
-                      onMouseLeave={(e) => {
-                        // PC에서만 호버 효과 해제 (비활성화 상태가 아닐 때만)
-                        if (deviceType === "desktop" && !isSwitchingCamera) {
-                          e.target.style.backgroundColor = 'rgba(16, 185, 129, 0.1)';
-                          e.target.style.borderColor = 'rgba(16, 185, 129, 0.3)';
-                        }
-                      }}
-                      title={isSwitchingCamera ? "카메라 전환 중..." : "클릭하여 화면 방향 전환"}
-                    >
-                      🔄 {shouldFlipCamera ? "미러링" : "정방향"}
-                    </button>
-                  </>
-                )}
-              </div>
+
             </div>
           </div>
         </div>
@@ -1474,128 +1239,112 @@ function App() {
               <StartCard onStart={startCamera} isModelLoaded={isModelLoaded} />
           ) : (
               <div className="camera-view">
-                {/* Camera View */}
-                <div 
-                  className="camera-container"
-                >
-                  <Webcam
-                      key={webcamKey}
-                      ref={webcamRef}
-                      audio={false}
-                      screenshotFormat="image/jpeg"
-                      videoConstraints={{
-                        facingMode: cameraFacing, // 🎯 동적 카메라 설정
-                        // 📱 안드로이드 호환성을 위해 해상도 제약 조건 완화
-                        // width: { ideal: 960, min: 640 },
-                        // height: { ideal: 540, min: 480 },
-                        // frameRate: { ideal: 24, max: 30 },
-                        // aspectRatio: 16/9
-                      }}
-                      style={{
-                        position: 'absolute',
-                        width: '100%',
-                        height: '100%',
-                        objectFit: 'cover',
-                        zIndex: 1,
-                        left: 0,
-                        top: 0,
-                        borderRadius: 'inherit',
-                        transform: shouldFlipCamera ? 'scaleX(-1)' : 'none', // 🎯 비디오만 반전
-                      }}
-                      onUserMedia={(stream) => {
-                        if (debugMode) {
-                          console.log("Camera stream obtained successfully");
-                          console.log("Stream settings:", stream.getVideoTracks()[0].getSettings());
-                        }
-                        streamRef.current = stream;
-
-                        // 카메라 영상이 실제로 로드되었으므로 전환 로딩 상태 해제
-                        setIsSwitchingCamera(false);
-                        
-                        // 카메라 전환 완료 후 추론 루프 명시적 재시작
-                        if (isDetecting) {
-                          setTimeout(() => {
-                            // ref를 통해 최신 함수에 접근
-                            if (typeof inferenceLoop === 'function') {
-                              inferenceLoop();
-                              console.log('🔄 카메라 전환 완료 - 추론 루프 재시작');
-                            }
-                          }, 100); // 100ms 후 재시작하여 카메라 안정화 대기
-                        }
-
-                        // 캔버스 정보 확인 (디버깅용)
-                        if (debugMode) {
-                          const canvas = canvasRef.current;
-                          if (canvas) {
-                            console.log("Canvas ready:", canvas.width, canvas.height);
-                          }
-                        }
-                      }}
-                      onUserMediaError={(error) => {
-                        console.error("Camera access error:", error);
-                        let errorMsg = '카메라 접근 오류';
-
-                        if (error.name === 'NotAllowedError') {
-                          errorMsg = '카메라 권한이 거부되었습니다. 브라우저 설정에서 카메라 권한을 허용해주세요.';
-                        } else if (error.name === 'NotFoundError') {
-                          errorMsg = '카메라를 찾을 수 없습니다.';
-                        } else if (error.name === 'NotSupportedError') {
-                          errorMsg = 'HTTPS 연결이 필요합니다.';
-                        }
-
-                        setErrorMessage(errorMsg);
-                        setIsDetecting(false);
-                      }}
-                  />
-                  <canvas
-                      ref={canvasRef}
-                      className="detection-canvas"
-                      style={{
-                        position: 'absolute',
-                        top: 0,
-                        left: 0,
-                        width: '100%',
-                        height: '100%',
-                        zIndex: 2,
-                        objectFit: 'cover',
-                        borderRadius: 'inherit',
-                        touchAction: 'none',
-                        pointerEvents: 'none',
-                        // 🎯 캔버스는 CSS 반전 없이, 내부에서 좌표 변환으로 처리
-                      }}
-                  />
-
-                  {/* 🎯 카메라 전환 로딩 오버레이 */}
-                  {isSwitchingCamera && (
-                    <div style={{
-                      position: 'absolute',
-                      top: 0,
-                      left: 0,
-                      width: '100%',
-                      height: '100%',
-                      backgroundColor: 'rgba(0, 0, 0, 0.7)',
-                      display: 'flex',
-                      alignItems: 'center',
-                      justifyContent: 'center',
-                      zIndex: 3,
-                      borderRadius: 'inherit'
-                    }}>
-                      <div style={{
-                        display: 'flex',
-                        flexDirection: 'column',
-                        alignItems: 'center',
-                        color: 'white',
-                        fontSize: '1rem'
-                      }}>
-                        <div className="loading-spinner" style={{ marginBottom: '0.5rem' }}>
-                          <Icon name="loader" />
-                  </div>
-                        <div>카메라 전환 중...</div>
-                      </div>
-                    </div>
+                <div className="camera-container" style={{ position: 'relative' }}>
+                  {/* 이미지 표시를 위한 이미지 엘리먼트 추가 */}
+                  {selectedImage && (
+                      <img
+                          ref={imageElementRef}
+                          src={selectedImage}
+                          alt="Selected"
+                          style={{
+                            position: 'absolute',
+                            width: '100%',
+                            height: '100%',
+                            objectFit: 'contain',
+                            zIndex: 1,
+                            left: 0,
+                            top: 0,
+                            borderRadius: 'inherit'
+                          }}
+                      />
                   )}
 
-                  {/* 🎯 모든 컨트롤 제거 - 완전히 깔끔한 화면 */}
+                  {isDrawingBox ? (
+                          <Card className="loading-card" style={{ position: 'absolute', zIndex: 2, left: 0, top: 0, width: '100%', height: '100%' }}>
+                            <div className="loading-spinner">
+                              <Icon name="loader" />
+                            </div>
+                            <h2>객체 탐지 중...</h2>
+                            <p>객체 탐지 중입니다. 잠시만 기다려주세요.</p>
+                          </Card>
+                      ):(
+                          <canvas
+                              ref={canvasRef}
+                              className="detection-canvas"
+                              style={{
+                                position: 'absolute',
+                                top: 0,
+                                left: 0,
+                                width: '100%',
+                                height: '100%',
+                                zIndex: 2,
+                                /*objectFit: 'cover',*/
+                                objectFit: 'contain',
+                                borderRadius: 'inherit',
+                                touchAction: 'none',
+                                pointerEvents: 'none'
+                              }}
+                          />
+                      )
+                  }
+
+                  <div
+                      style={{
+                        position: 'absolute',
+                        bottom: 3,
+                        left: '50%',
+                        transform: 'translateX(-50%)',
+                        display: 'flex',
+                        gap: 10,
+                        zIndex: 3,
+                        backgroundColor: 'rgba(0,0,0,0.5)',
+                        padding: 10,
+                        borderRadius: 8,
+                        whiteSpace: 'nowrap',
+                      }}
+                  >
+                    {sampleImages.map(({ src, id, label }) => (
+                        <button
+                            key={id}
+                            disabled={isDrawingBox}
+                            className="sample-image-button"
+                            style={{
+                              backgroundColor: '#2196F3',
+                              marginRight: 10
+                            }}
+                            onClick={() => {
+                              setSelectedImage(src);  // 직접 src를 설정
+                            }}
+                        >
+                          {label}
+                        </button>
+                    ))}
+
+                    {/* 파일 선택 버튼 추가 */}
+                    <input
+                        type="file"
+                        id="fileInput"
+                        accept="image/*"
+                        style={{ display: 'none' }}
+                        onChange={(e) => {
+                          if (e.target.files && e.target.files[0]) {
+                            const file = e.target.files[0];
+                            const imageUrl = URL.createObjectURL(file);
+                            setSelectedImage(imageUrl);
+                          }
+                        }}
+                    />
+                    <button
+                        disabled={isDrawingBox}
+                        className="sample-image-button"
+                        style={{
+                          backgroundColor: '#4CAF50',
+                        }}
+                        onClick={() => document.getElementById('fileInput').click()}
+                    >
+                      파일 선택
+                    </button>
+                  </div>
                 </div>
 
                 {/* Detection Info - Always show the card, even when empty */}
@@ -1603,17 +1352,11 @@ function App() {
                   <h3 style={{ marginBottom: '0.5rem' }}>
                     {detections.length > 0
                         ? `탐지된 객체 (${detections.length})`
-                      : '객체를 카메라에 비춰보세요'}
+                      : '이미지를 선택해주세요'}
                   </h3>
                   
                                      {/* 📊 성능 정보 표시 */}
-                   <div style={{ 
-                     fontSize: '0.85rem', 
-                     color: 'var(--text-secondary)', 
-                     marginBottom: '0.5rem'
-                   }}>
-                     추론 속도: <span style={{ color: 'var(--primary-color)', fontWeight: '500' }}>{currentFPS} FPS</span>
-                   </div>
+
                   {detections.length > 0 ? (
                       <div className="detection-badges">
                         {detections.map((detection, index) => (
@@ -1637,12 +1380,12 @@ function App() {
                         </p>
 
                         <p style={{ color: 'var(--text-secondary)', fontSize: '0.85rem', marginTop: '0.5rem' }}>
-                          카메라에 객체를 비추거나 신뢰도 설정을 조정해보세요
+                          신뢰도 설정을 조정해보세요
                         </p>
                       </div>
                   ) : (
                       <p style={{ color: 'var(--text-secondary)', marginTop: '0.5rem' }}>
-                        카메라에 객체를 비추면 여기에 탐지 결과가 표시됩니다
+                        여기에 탐지 결과가 표시됩니다
                       </p>
                   )}
                 </Card>
