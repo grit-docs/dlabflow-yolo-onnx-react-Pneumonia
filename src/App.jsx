@@ -303,7 +303,7 @@ function App() {
 
       const ctx = canvas.getContext('2d');
 
-      ctx.clearRect(0, 0, canvas.width, canvas.height);
+      ctx.clearRect(0, 0, canvas.width, canvas.height); // 그리기전 초기화
       drawBoundingBoxes(detectionMemoryRef.current, ctx, canvas.width, canvas.height);
 
       console.log("🖼️ 캔버스에 결과 그리기 완료");
@@ -427,6 +427,14 @@ function App() {
   const inferenceLoop = useCallback(async () => {
     if (!isDetecting || !sessionRef.current || !selectedImage) return;
 
+    // 캔버스 초기화 (이전 박스정보 지움)
+    if (canvasRef.current) {
+      const canvas = canvasRef.current;
+      const ctx = canvas.getContext('2d');
+      ctx.clearRect(0, 0, canvas.width, canvas.height);
+    }
+
+    //추론 후 그리기 알림 함수 종료후 그림
     setIsDrawingBox(true);
 
     const inferenceId = Date.now() + Math.random();
