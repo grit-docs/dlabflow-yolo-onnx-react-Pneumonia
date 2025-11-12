@@ -274,12 +274,19 @@ function App() {
   // customThreshold 변경 시 ref도 업데이트
   useEffect(() => {
     thresholdRef.current = customThreshold;
-     inferenceLoop();
+
+    // 이전 탐지 결과 초기화
+    setDetections([]);
+    inferenceLoop();
+
   }, [customThreshold]);
 
 
   useEffect(() => {
     if (selectedImage) {
+      // 이전 탐지 결과 초기화
+      setDetections([]);
+
       console.log("✅ 탐지 시작");
       // console.log(`🖼️ 선택된 이미지: ${selectedImage}`);
       inferenceLoop();
@@ -426,13 +433,6 @@ function App() {
   // 🚀 고성능 추론 루프 - 스마트 Session 관리
   const inferenceLoop = useCallback(async () => {
     if (!isDetecting || !sessionRef.current || !selectedImage) return;
-
-    // 캔버스 초기화 (이전 박스정보 지움)
-    if (canvasRef.current) {
-      const canvas = canvasRef.current;
-      const ctx = canvas.getContext('2d');
-      ctx.clearRect(0, 0, canvas.width, canvas.height);
-    }
 
     //추론 후 그리기 알림 함수 종료후 그림
     setIsDrawingBox(true);
@@ -1276,6 +1276,7 @@ function App() {
                             <p>객체 탐지 중입니다. 잠시만 기다려주세요.</p>
                           </Card>
                       ):(
+                      detections.length > 0 && (
                           <canvas
                               ref={canvasRef}
                               className="detection-canvas"
@@ -1293,7 +1294,7 @@ function App() {
                                 pointerEvents: 'none'
                               }}
                           />
-                      )
+                      ))
                   }
 
                   <div
